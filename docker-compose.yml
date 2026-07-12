@@ -1,0 +1,40 @@
+# docker-compose describes the WHOLE app: 3 services, one network, one command.
+# Run it with:   docker compose up -d
+# Stop it with:  docker compose down
+#
+# Compose automatically creates a private network and registers each service by
+# name, so containers reach each other as "redis", "backend", "frontend" — no
+# host.docker.internal, no manual --network flags.
+
+services:
+  redis:
+    image: redis:7-alpine
+    # Persist data to a named volume so the count survives restarts.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  backend:
+    image: ghcr.io/harshvani01/counter-backend:latest
+    environment:
+      # Reach Redis by its SERVICE NAME on the compose network.
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  frontend:
+    image: ghcr.io/harshvani01/counter-frontend:latest
+    ports:
+      # Only the frontend is exposed to the outside world (host:container).
+      # Backend and Redis are reachable only inside the network — more secure.
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+# Named volume managed by Docker; keeps Redis data outside the container.
+volumes:
+  redis-data:
