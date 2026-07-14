@@ -1,0 +1,6 @@
+# A Namespace is a folder that groups all our objects together, keeping them
+# isolated from kube-system and anything else on the cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: counter-app

@@ -1,0 +1,21 @@
+# The Ingress tells Traefik (k3s's built-in ingress controller) how to route
+# incoming HTTP for our domain. All paths go to the frontend Service; the
+# frontend's nginx internally proxies /api to the backend Service.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: counter-app
+  namespace: counter-app
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: tpproject.duckdns.org
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80

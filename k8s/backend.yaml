@@ -1,0 +1,62 @@
+# Backend: 2 replicas (identical pods). The Service load-balances across them,
+# and k8s keeps exactly 2 alive — kill one and it's instantly replaced.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: counter-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  # Rolling update: bring up a new pod before removing an old one → zero downtime.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: ghcr.io/harshvani01/counter-backend:latest
+          # Always re-pull so a fresh :latest is picked up on redeploy.
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          env:
+            # Reach Redis by its Service name.
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PORT
+              value: "6379"
+          # Liveness: restart the pod if the process wedges.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # Readiness: only send traffic once Redis is reachable.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: counter-app
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8000
+      targetPort: 8000

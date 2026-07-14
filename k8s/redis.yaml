@@ -1,0 +1,73 @@
+# Redis: a PersistentVolumeClaim for durable storage, a Deployment to run it,
+# and a Service to give it a stable in-cluster name ("redis").
+---
+# The PVC asks the cluster for 1Gi of storage. Your default "local-path"
+# storage class provisions it automatically on the node's disk.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data
+  namespace: counter-app
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: counter-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  # Redis owns one read-write volume; recreate (don't run two at once) on update.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["--appendonly", "yes"]
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          # Probes: k8s uses these to know if Redis is alive/ready.
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 2
+            periodSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: redis-data
+---
+# A Service is a stable virtual IP + DNS name. Other pods reach Redis as
+# "redis" (or "redis.counter-app") regardless of which pod/IP backs it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: counter-app
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
