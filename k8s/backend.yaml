@@ -34,6 +34,24 @@ spec:
               value: redis
             - name: REDIS_PORT
               value: "6379"
+            # Reach Postgres by its Service name.
+            - name: PG_HOST
+              value: postgres
+            - name: PG_PORT
+              value: "5432"
+            - name: PG_DB
+              value: counter
+            - name: PG_USER
+              value: counter
+            # Password comes from a k8s Secret, never hardcoded in the manifest.
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            # How often to snapshot Redis -> Postgres (seconds).
+            - name: SNAPSHOT_INTERVAL
+              value: "5"
           # Liveness: restart the pod if the process wedges.
           livenessProbe:
             httpGet:

@@ -1,0 +1,96 @@
+# PostgreSQL: the durable system-of-record. A Secret holds the password, a PVC
+# holds the data, a Deployment runs the server, and a Service names it "postgres".
+---
+# A Secret is like a ConfigMap but for sensitive values. By default it is only
+# base64-encoded (NOT encrypted) at rest, so this is fine for learning but in
+# production you would use sealed-secrets / an external secret manager and would
+# NOT commit real credentials to git. This password is a demo-only value.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: counter-app
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: counter-demo-pw
+---
+# 1Gi of durable storage, provisioned by the default "local-path" storage class.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: counter-app
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: counter-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  # One server owning one read-write volume: recreate on update, never run two.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: counter
+            - name: POSTGRES_DB
+              value: counter
+            # Password injected from the Secret above (not written in plain text).
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            # Store data in a subdirectory of the mount so an existing lost+found
+            # at the volume root doesn't block Postgres initialisation.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "counter", "-d", "counter"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "counter", "-d", "counter"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: counter-app
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

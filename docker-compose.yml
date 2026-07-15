@@ -15,14 +15,32 @@ services:
       - redis-data:/data
     restart: unless-stopped
 
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: counter
+      POSTGRES_DB: counter
+      POSTGRES_PASSWORD: counter-demo-pw
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
   backend:
     image: ghcr.io/harshvani01/counter-backend:latest
     environment:
       # Reach Redis by its SERVICE NAME on the compose network.
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      # Postgres (durable snapshots) — also reached by service name.
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_DB: counter
+      PG_USER: counter
+      PG_PASSWORD: counter-demo-pw
+      SNAPSHOT_INTERVAL: "5"
     depends_on:
       - redis
+      - postgres
     restart: unless-stopped
 
   frontend:
@@ -38,3 +56,4 @@ services:
 # Named volume managed by Docker; keeps Redis data outside the container.
 volumes:
   redis-data:
+  pg-data:
