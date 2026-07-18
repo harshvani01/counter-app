@@ -1,8 +1,10 @@
 import asyncio
+import json
 import os
 
 import asyncpg
 import redis.asyncio as redis
+from aiokafka import AIOKafkaProducer
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -21,6 +23,11 @@ PG_PASSWORD = os.getenv("PG_PASSWORD", "counter")
 # How often (seconds) to snapshot Redis -> Postgres.
 SNAPSHOT_INTERVAL = float(os.getenv("SNAPSHOT_INTERVAL", "5"))
 
+# Kafka: the durable event log between "accepting" and "applying" a change.
+# The API produces an event here; a separate consumer applies it to Redis.
+KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "counter-events")
+
 app = FastAPI(title="Counter API", version="1.0.0")
 
 # CORS is permissive here because the frontend may be served from a different
@@ -35,6 +42,7 @@ app.add_middleware(
 
 redis_client: redis.Redis | None = None
 pg_pool: asyncpg.Pool | None = None
+kafka_producer: AIOKafkaProducer | None = None
 _snapshot_task: asyncio.Task | None = None
 
 
@@ -54,6 +62,8 @@ async def startup() -> None:
     # has no counter yet, restore it from the last durable snapshot.
     await _ensure_pg()
     await _restore_from_pg()
+    # Connect the Kafka producer (best-effort; writes 503 until it's up).
+    await _ensure_producer()
     # Start the background loop that snapshots Redis -> Postgres on an interval.
     _snapshot_task = asyncio.create_task(_snapshot_loop())
 
@@ -62,6 +72,8 @@ async def startup() -> None:
 async def shutdown() -> None:
     if _snapshot_task is not None:
         _snapshot_task.cancel()
+    if kafka_producer is not None:
+        await kafka_producer.stop()
     if pg_pool is not None:
         await pg_pool.close()
     if redis_client is not None:
@@ -72,6 +84,38 @@ def _client() -> redis.Redis:
     if redis_client is None:
         raise HTTPException(status_code=503, detail="Redis client not initialised")
     return redis_client
+
+
+async def _ensure_producer() -> AIOKafkaProducer | None:
+    """Lazily start the Kafka producer. Returns None if Kafka is unreachable, so
+    the write endpoints can respond 503 instead of crashing."""
+    global kafka_producer
+    if kafka_producer is not None:
+        return kafka_producer
+    try:
+        producer = AIOKafkaProducer(
+            bootstrap_servers=KAFKA_BOOTSTRAP,
+            value_serializer=lambda v: json.dumps(v).encode(),
+            acks="all",  # wait until the broker durably records the event
+        )
+        await producer.start()
+        kafka_producer = producer
+        print(f"[kafka] producer connected to {KAFKA_BOOTSTRAP}", flush=True)
+        return kafka_producer
+    except Exception as exc:  # noqa: BLE001
+        print(f"[kafka] producer unavailable, will retry: {exc}", flush=True)
+        kafka_producer = None
+        return None
+
+
+async def _emit(op: str) -> None:
+    """Produce one counter event to Kafka and wait for the broker to ack it.
+    This is the whole write path now: accept the command, log it durably, done.
+    The consumer applies it to Redis asynchronously."""
+    producer = await _ensure_producer()
+    if producer is None:
+        raise HTTPException(status_code=503, detail="event bus (kafka) unavailable")
+    await producer.send_and_wait(KAFKA_TOPIC, {"op": op})
 
 
 CREATE_TABLE_SQL = """
@@ -157,22 +201,24 @@ async def get_counter() -> CounterResponse:
     return CounterResponse(value=int(value) if value is not None else 0)
 
 
-@app.post("/api/counter/increment", response_model=CounterResponse)
-async def increment_counter() -> CounterResponse:
-    value = await _client().incr(COUNTER_KEY)
-    return CounterResponse(value=value)
+@app.post("/api/counter/increment", status_code=202)
+async def increment_counter() -> dict:
+    # Write path: emit an event and return 202 Accepted. The value is NOT here
+    # because it hasn't been applied yet — the client queries GET /api/counter.
+    await _emit("increment")
+    return {"status": "accepted", "op": "increment"}
 
 
-@app.post("/api/counter/decrement", response_model=CounterResponse)
-async def decrement_counter() -> CounterResponse:
-    value = await _client().decr(COUNTER_KEY)
-    return CounterResponse(value=value)
+@app.post("/api/counter/decrement", status_code=202)
+async def decrement_counter() -> dict:
+    await _emit("decrement")
+    return {"status": "accepted", "op": "decrement"}
 
 
-@app.post("/api/counter/reset", response_model=CounterResponse)
-async def reset_counter() -> CounterResponse:
-    await _client().set(COUNTER_KEY, 0)
-    return CounterResponse(value=0)
+@app.post("/api/counter/reset", status_code=202)
+async def reset_counter() -> dict:
+    await _emit("reset")
+    return {"status": "accepted", "op": "reset"}
 
 
 @app.get("/api/history")

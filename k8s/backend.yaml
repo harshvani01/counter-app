@@ -52,6 +52,11 @@ spec:
             # How often to snapshot Redis -> Postgres (seconds).
             - name: SNAPSHOT_INTERVAL
               value: "5"
+            # Kafka broker to produce counter events to.
+            - name: KAFKA_BOOTSTRAP
+              value: kafka:9092
+            - name: KAFKA_TOPIC
+              value: counter-events
           # Liveness: restart the pod if the process wedges.
           livenessProbe:
             httpGet:

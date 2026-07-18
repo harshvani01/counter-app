@@ -1,0 +1,41 @@
+# The consumer: same image as the backend, but started with a different command
+# so it runs the Kafka consumer loop instead of the web server. It has no
+# Service because nothing calls it — it only pulls events from Kafka and writes
+# to Redis. Keep it at 1 replica: with a single-partition topic only one
+# consumer in the group can be active anyway, and 1 consumer preserves the
+# global order of increments/decrements/resets.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consumer
+  namespace: counter-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: consumer
+  template:
+    metadata:
+      labels:
+        app: consumer
+    spec:
+      containers:
+        - name: consumer
+          image: ghcr.io/harshvani01/counter-backend:latest
+          imagePullPolicy: Always
+          # Run the consumer module instead of uvicorn.
+          command: ["python", "-m", "app.consumer"]
+          env:
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: KAFKA_BOOTSTRAP
+              value: kafka:9092
+            - name: KAFKA_TOPIC
+              value: counter-events
+            - name: KAFKA_GROUP
+              value: counter-consumers
+            # Set >0 to deliberately slow the consumer for a lag demo.
+            - name: CONSUME_DELAY_MS
+              value: "0"

@@ -9,14 +9,30 @@ export default function App() {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  async function call(path, method = "GET") {
-    setLoading(true);
+  // QUERY side: read the current counter value from Redis (via the backend).
+  async function refresh() {
     setError(null);
     try {
-      const res = await fetch(`${API}${path}`, { method });
+      const res = await fetch(API);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setValue(data.value);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  // COMMAND side: fire a write. The backend returns 202 Accepted and pushes an
+  // event onto Kafka; a separate consumer applies it to Redis a moment later.
+  // So we don't get a value back — we re-fetch shortly after (eventual
+  // consistency). Under heavy load the value may briefly lag behind.
+  async function command(path) {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API}${path}`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setTimeout(refresh, 250); // give the consumer a moment, then re-query
     } catch (err) {
       setError(err.message);
     } finally {
@@ -25,7 +41,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    call("");
+    refresh();
   }, []);
 
   return (
@@ -33,19 +49,22 @@ export default function App() {
       <h1>Counter</h1>
       <div className="value">{value === null ? "—" : value}</div>
       <div className="buttons">
-        <button onClick={() => call("/decrement", "POST")} disabled={loading}>
+        <button onClick={() => command("/decrement")} disabled={loading}>
           −
         </button>
-        <button onClick={() => call("/increment", "POST")} disabled={loading}>
+        <button onClick={() => command("/increment")} disabled={loading}>
           +
         </button>
       </div>
       <button
         className="reset"
-        onClick={() => call("/reset", "POST")}
+        onClick={() => command("/reset")}
         disabled={loading}
       >
         Reset
+      </button>
+      <button className="reset" onClick={refresh} disabled={loading}>
+        Refresh
       </button>
       {error && <p className="error">Error: {error}</p>}
     </div>

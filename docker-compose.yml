@@ -25,6 +25,29 @@ services:
       - pg-data:/var/lib/postgresql/data
     restart: unless-stopped
 
+  kafka:
+    image: apache/kafka:3.9.0
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@localhost:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: "1"
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+      CLUSTER_ID: "counter-kraft-cluster1"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    restart: unless-stopped
+
   backend:
     image: ghcr.io/harshvani01/counter-backend:latest
     environment:
@@ -38,9 +61,29 @@ services:
       PG_USER: counter
       PG_PASSWORD: counter-demo-pw
       SNAPSHOT_INTERVAL: "5"
+      # Kafka event log.
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_TOPIC: counter-events
     depends_on:
       - redis
       - postgres
+      - kafka
+    restart: unless-stopped
+
+  consumer:
+    # Same image as backend, different command: run the Kafka consumer loop.
+    image: ghcr.io/harshvani01/counter-backend:latest
+    command: ["python", "-m", "app.consumer"]
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_TOPIC: counter-events
+      KAFKA_GROUP: counter-consumers
+      CONSUME_DELAY_MS: "0"
+    depends_on:
+      - redis
+      - kafka
     restart: unless-stopped
 
   frontend:
@@ -57,3 +100,4 @@ services:
 volumes:
   redis-data:
   pg-data:
+  kafka-data:
