@@ -3,36 +3,20 @@ import { useEffect, useState } from "react";
 // Relative base path. In production Traefik routes /api to the backend service;
 // during local dev Vite proxies /api (see vite.config.js).
 const API = "/api/counter";
-const POLL_MS = 1000;
+const STREAM = "/api/counter/stream";
 
 export default function App() {
-  // `value` is the authoritative number last read from Redis (via the backend).
+  // `value` is the authoritative number pushed to us over the SSE stream.
   const [value, setValue] = useState(null);
-  // `pending` is an optimistic overlay: the net effect of writes we've fired but
-  // that the Kafka consumer may not have applied to Redis yet. It makes the UI
-  // feel instant even though the backend is eventually consistent.
+  // `pending` is an optimistic overlay: writes we've fired but that the server
+  // hasn't confirmed back over the stream yet. Makes clicks feel instant.
   const [pending, setPending] = useState(0);
   const [error, setError] = useState(null);
 
-  // QUERY side: read the current value. Never blanks the display on a transient
-  // error — we keep showing the last known number.
-  async function refresh() {
-    try {
-      const res = await fetch(API);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setValue(data.value);
-      setPending(0); // the server value moved: our optimistic writes have landed
-      setError(null);
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
   // COMMAND side: fire an async write. The backend returns 202 Accepted and drops
   // an event on Kafka; a separate consumer applies it to Redis a moment later.
-  // We optimistically shift `pending` so the number updates immediately, then the
-  // next poll reconciles with the real value. On failure we roll the overlay back.
+  // We optimistically shift `pending` so the number updates immediately; the SSE
+  // stream then delivers the real value. On failure we roll the overlay back.
   async function command(path, delta) {
     setPending((p) => p + delta);
     try {
@@ -45,12 +29,18 @@ export default function App() {
     }
   }
 
-  // Poll the authoritative value once per second so the UI self-heals without
-  // any manual refresh — this is how a client copes with an async backend.
+  // Open one Server-Sent Events connection. The server pushes the current value
+  // on connect and every time it changes — so we never poll. EventSource also
+  // auto-reconnects if the connection drops, re-syncing the value on reconnect.
   useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, POLL_MS);
-    return () => clearInterval(id);
+    const es = new EventSource(STREAM);
+    es.onmessage = (e) => {
+      setValue(parseInt(e.data, 10));
+      setPending(0); // server confirmed: our optimistic writes have landed
+      setError(null);
+    };
+    es.onerror = () => setError("stream disconnected, reconnecting…");
+    return () => es.close();
   }, []);
 
   const display = value === null ? "—" : value + pending;

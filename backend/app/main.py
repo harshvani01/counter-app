@@ -7,6 +7,7 @@ import redis.asyncio as redis
 from aiokafka import AIOKafkaProducer
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
@@ -27,6 +28,10 @@ SNAPSHOT_INTERVAL = float(os.getenv("SNAPSHOT_INTERVAL", "5"))
 # The API produces an event here; a separate consumer applies it to Redis.
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "counter-events")
+
+# Redis Pub/Sub channel the consumer publishes new values to. The SSE endpoint
+# subscribes here and pushes updates to browsers (server-push, no polling).
+REDIS_CHANNEL = os.getenv("REDIS_CHANNEL", "counter-updates")
 
 app = FastAPI(title="Counter API", version="1.0.0")
 
@@ -219,6 +224,46 @@ async def decrement_counter() -> dict:
 async def reset_counter() -> dict:
     await _emit("reset")
     return {"status": "accepted", "op": "reset"}
+
+
+@app.get("/api/counter/stream")
+async def stream_counter() -> StreamingResponse:
+    """Server-Sent Events: push the counter value to the browser whenever it
+    changes, so clients never poll. On connect we send the current value, then
+    forward every update the consumer publishes to the Redis channel. An idle
+    client sends zero requests — the one connection just stays open."""
+
+    async def event_gen():
+        rc = _client()
+        pubsub = rc.pubsub()
+        await pubsub.subscribe(REDIS_CHANNEL)
+        try:
+            # 1) Send the current value immediately so a fresh page isn't blank.
+            current = await rc.get(COUNTER_KEY)
+            yield f"data: {int(current) if current is not None else 0}\n\n"
+            # 2) Then stream updates as the consumer publishes them.
+            while True:
+                msg = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=15.0
+                )
+                if msg is not None:
+                    yield f"data: {msg['data']}\n\n"
+                else:
+                    # No update for a while: send an SSE comment as a heartbeat
+                    # so proxies don't drop the idle connection.
+                    yield ": keepalive\n\n"
+        finally:
+            await pubsub.unsubscribe(REDIS_CHANNEL)
+            await pubsub.aclose()
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # ask nginx not to buffer the stream
+        },
+    )
 
 
 @app.get("/api/history")

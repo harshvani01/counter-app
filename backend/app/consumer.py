@@ -28,6 +28,11 @@ KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "counter-events")
 # partitions among them and never delivers the same event to two of them.
 KAFKA_GROUP = os.getenv("KAFKA_GROUP", "counter-consumers")
 
+# After applying an event we PUBLISH the new value to this Redis channel. The
+# API's SSE endpoint subscribes to it and pushes the value out to browsers, so
+# clients never have to poll. This is the "event source" for server-push.
+REDIS_CHANNEL = os.getenv("REDIS_CHANNEL", "counter-updates")
+
 # Optional artificial per-event delay (milliseconds). Set >0 to deliberately
 # slow the consumer and make the buffering/lag visible during a flood demo.
 CONSUME_DELAY_MS = float(os.getenv("CONSUME_DELAY_MS", "0"))
@@ -35,13 +40,17 @@ CONSUME_DELAY_MS = float(os.getenv("CONSUME_DELAY_MS", "0"))
 
 async def _apply(rc: redis.Redis, op: str) -> None:
     if op == "increment":
-        await rc.incr(COUNTER_KEY)
+        newval = await rc.incr(COUNTER_KEY)
     elif op == "decrement":
-        await rc.decr(COUNTER_KEY)
+        newval = await rc.decr(COUNTER_KEY)
     elif op == "reset":
         await rc.set(COUNTER_KEY, 0)
+        newval = 0
     else:
         print(f"[consumer] ignoring unknown op: {op!r}", flush=True)
+        return
+    # Notify any listening SSE streams that the value changed.
+    await rc.publish(REDIS_CHANNEL, newval)
 
 
 async def main() -> None:
