@@ -58,7 +58,7 @@ export default function App() {
 
   return (
     <div className="card">
-      <h1>Counter</h1>
+      <h1>Counter-app</h1>
       <div className="value">{display}</div>
       <div className="status">{syncing ? "syncing…" : "\u00a0"}</div>
       <div className="buttons">
