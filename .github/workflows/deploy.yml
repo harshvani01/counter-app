@@ -1,0 +1,94 @@
+name: build-and-deploy
+
+# Run on every push to main. The pipeline builds both images, pushes them to
+# GHCR tagged with the commit SHA, then SSHes into the VM and rolls the k3s
+# deployments to that exact tag (a changing tag is what makes k8s roll).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {} # allow manual runs from the Actions tab
+
+# Never let two deploys race each other; a newer push cancels an in-flight one.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: harshvani01
+  BACKEND_IMAGE: ghcr.io/harshvani01/counter-backend
+  FRONTEND_IMAGE: ghcr.io/harshvani01/counter-frontend
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout
+      packages: write # push to GHCR with the built-in GITHUB_TOKEN
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Short commit SHA becomes the immutable image tag, e.g. a1b2c3d.
+      - name: Compute image tag
+        id: tag
+        run: echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ env.BACKEND_IMAGE }}:${{ steps.tag.outputs.sha }}
+            ${{ env.BACKEND_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build & push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ env.FRONTEND_IMAGE }}:${{ steps.tag.outputs.sha }}
+            ${{ env.FRONTEND_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # SSH into the VM and roll all three deployments to the new SHA tag.
+      # consumer shares the backend image, so it rolls with the same tag.
+      - name: Deploy to k3s over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          port: ${{ secrets.VM_SSH_PORT || 22 }}
+          envs: SHA
+          script_stop: true
+          script: |
+            set -e
+            export KUBECONFIG=$HOME/.kube/config
+            NS=counter-app
+            SHA=${{ steps.tag.outputs.sha }}
+            BACKEND=${{ env.BACKEND_IMAGE }}:$SHA
+            FRONTEND=${{ env.FRONTEND_IMAGE }}:$SHA
+            echo "Deploying backend/consumer=$BACKEND  frontend=$FRONTEND"
+            kubectl set image deployment/backend  backend=$BACKEND   -n $NS
+            kubectl set image deployment/consumer consumer=$BACKEND  -n $NS
+            kubectl set image deployment/frontend frontend=$FRONTEND -n $NS
+            kubectl rollout status deployment/backend  -n $NS --timeout=120s
+            kubectl rollout status deployment/consumer -n $NS --timeout=120s
+            kubectl rollout status deployment/frontend -n $NS --timeout=120s
+            echo "Deployed $SHA"
